@@ -50,6 +50,24 @@ from langchain_ollama import ChatOllama
 from langchain_huggingface import HuggingFaceEmbeddings
 from datasets import Dataset
 
+try:
+    import numpy as np
+    from trulens.apps.llamaindex import TruLlama
+    from trulens.core import Metric, Selector, TruSession
+    from trulens.providers.litellm import LiteLLM
+
+    TRULENS_AVAILABLE = True
+    TRULENS_IMPORT_ERROR = ""
+except Exception as trulens_import_error:
+    np = None
+    TruLlama = None
+    Metric = None
+    Selector = None
+    TruSession = None
+    LiteLLM = None
+    TRULENS_AVAILABLE = False
+    TRULENS_IMPORT_ERROR = str(trulens_import_error)
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -102,6 +120,10 @@ MIN_CONTEXT_LENGTH  = 150   # chars mínimos para considerar contexto útil
 MAX_CONTEXT_LENGTH  = 4000  # [FIX 2] Techo duro: protege num_ctx=4096 del query_llm
 
 # Semáforo Nivel 1: vídeos procesándose en paralelo.
+TRULENS_APP_NAME       = "GraphRAG_Aprendia"
+TRULENS_APP_VERSION    = "v5.2-ollama"
+TRULENS_FEEDBACK_MODEL = os.getenv("TRULENS_FEEDBACK_MODEL", f"ollama/{QUERY_LLM_MODEL}")
+
 VIDEO_CONCURRENCY   = 4
 
 ETIQUETAS_VALIDAS = {
@@ -161,6 +183,8 @@ graph_index   : Optional[PropertyGraphIndex] = None
 chat_sessions : dict[str, object] = {}
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 _video_semaphore = asyncio.Semaphore(VIDEO_CONCURRENCY)
+_trulens_session = None
+_trulens_feedbacks = None
 
 # =============================================================================
 # DETECCIÓN DE GPU
@@ -459,6 +483,92 @@ def _crear_concepto_sin_evidencia(termino: str, definicion: str) -> ConceptoEval
         contexto_recuperado="",
     )
 
+def _trulens_missing_detail() -> dict:
+    return {
+        "mensaje": "TruLens no esta disponible en este entorno.",
+        "instalar": [
+            "trulens",
+            "trulens-apps-llamaindex",
+            "trulens-providers-litellm",
+        ],
+        "error_import": TRULENS_IMPORT_ERROR,
+    }
+
+def _require_trulens() -> None:
+    if not TRULENS_AVAILABLE:
+        raise HTTPException(status_code=501, detail=_trulens_missing_detail())
+
+def _get_trulens_session():
+    global _trulens_session
+    _require_trulens()
+    if _trulens_session is None:
+        _trulens_session = TruSession()
+    return _trulens_session
+
+def _get_trulens_feedbacks():
+    global _trulens_feedbacks
+    _require_trulens()
+    if _trulens_feedbacks is not None:
+        return _trulens_feedbacks
+
+    provider = LiteLLM(
+        model_engine=TRULENS_FEEDBACK_MODEL,
+        api_base=OLLAMA_BASE_URL,
+    )
+
+    f_groundedness = Metric(
+        implementation=provider.groundedness_measure_with_cot_reasons,
+        name="Groundedness",
+        selectors={
+            "source": Selector.select_context(collect_list=True),
+            "statement": Selector.select_record_output(),
+        },
+    )
+    f_answer_relevance = Metric(
+        implementation=provider.relevance_with_cot_reasons,
+        name="Answer Relevance",
+        selectors={
+            "prompt": Selector.select_record_input(),
+            "response": Selector.select_record_output(),
+        },
+    )
+    f_context_relevance = Metric(
+        implementation=provider.context_relevance_with_cot_reasons,
+        name="Context Relevance",
+        selectors={
+            "question": Selector.select_record_input(),
+            "context": Selector.select_context(collect_list=False),
+        },
+        agg=np.mean,
+    )
+
+    _trulens_feedbacks = [
+        f_groundedness,
+        f_answer_relevance,
+        f_context_relevance,
+    ]
+    return _trulens_feedbacks
+
+def _build_query_engine():
+    if graph_index is None:
+        raise HTTPException(status_code=400, detail="Grafo no cargado.")
+    return graph_index.as_query_engine(
+        llm=query_llm,
+        include_text=True,
+        similarity_top_k=RETRIEVAL_TOP_K,
+        node_postprocessors=[reranker],
+    )
+
+def _run_query_with_trulens(query_engine, pregunta: str, app_version: str):
+    _get_trulens_session()
+    recorder = TruLlama(
+        query_engine,
+        app_name=TRULENS_APP_NAME,
+        app_version=app_version,
+        feedbacks=_get_trulens_feedbacks(),
+    )
+    with recorder:
+        return query_engine.query(pregunta)
 # =============================================================================
 # CARGA DEL ÍNDICE AL ARRANCAR
 # =============================================================================
@@ -961,6 +1071,108 @@ async def validar_videos(req: ValidarVideosRequest):
 # =============================================================================
 # ENDPOINT /evaluar  —  Evaluación RAGAS sobre dataset embebido
 # =============================================================================
+@app.get("/trulens/estado")
+async def trulens_estado():
+    return {
+        "disponible": TRULENS_AVAILABLE,
+        "app_name": TRULENS_APP_NAME,
+        "app_version": TRULENS_APP_VERSION,
+        "feedback_model": TRULENS_FEEDBACK_MODEL,
+        "ollama_base_url": OLLAMA_BASE_URL,
+        "metricas": [
+            "Groundedness",
+            "Answer Relevance",
+            "Context Relevance",
+        ],
+        "detalle_si_no_disponible": None if TRULENS_AVAILABLE else _trulens_missing_detail(),
+    }
+
+@app.post("/trulens/consultar")
+async def trulens_consultar(req: ConsultaRequest):
+    """
+    Ejecuta una consulta contra el grafo y la registra en TruLens.
+    """
+    if not req.pregunta.strip():
+        raise HTTPException(status_code=400, detail="Pregunta vacia.")
+
+    _require_trulens()
+    query_engine = _build_query_engine()
+    loop = asyncio.get_running_loop()
+
+    try:
+        respuesta = await loop.run_in_executor(
+            executor,
+            lambda: _run_query_with_trulens(query_engine, req.pregunta, TRULENS_APP_VERSION),
+        )
+        source_nodes = getattr(respuesta, "source_nodes", [])
+        return {
+            "pregunta": req.pregunta,
+            "respuesta": str(respuesta),
+            "trulens": {
+                "registrado": True,
+                "app_name": TRULENS_APP_NAME,
+                "app_version": TRULENS_APP_VERSION,
+                "feedback_model": TRULENS_FEEDBACK_MODEL,
+                "source_nodes": len(source_nodes),
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TruLens fallo en consulta: {e}")
+        raise HTTPException(status_code=500, detail=f"Error en TruLens: {e}")
+
+@app.post("/trulens/evaluar")
+async def trulens_evaluar():
+    """
+    Recorre el EVAL_DATASET embebido y registra cada consulta en TruLens.
+    Usa el mismo query_engine que /consultar para que las trazas sean comparables.
+    """
+    _require_trulens()
+    query_engine = _build_query_engine()
+    loop = asyncio.get_running_loop()
+    detalle = []
+
+    logger.info(f"[TruLens] Registrando {len(EVAL_DATASET)} preguntas del dataset...")
+    for item in EVAL_DATASET:
+        question = item["question"]
+        try:
+            respuesta = await loop.run_in_executor(
+                executor,
+                lambda question=question: _run_query_with_trulens(
+                    query_engine,
+                    question,
+                    f"{TRULENS_APP_VERSION}-eval",
+                ),
+            )
+            source_nodes = getattr(respuesta, "source_nodes", [])
+            detalle.append({
+                "question": question,
+                "ground_truth": item["ground_truth"],
+                "answer": str(respuesta),
+                "source_nodes": len(source_nodes),
+                "registrado": True,
+            })
+        except Exception as e:
+            logger.warning(f"[TruLens] Error en pregunta '{question}': {e}")
+            detalle.append({
+                "question": question,
+                "ground_truth": item["ground_truth"],
+                "answer": "",
+                "source_nodes": 0,
+                "registrado": False,
+                "error": str(e),
+            })
+
+    return {
+        "total_preguntas": len(EVAL_DATASET),
+        "registradas": sum(1 for item in detalle if item["registrado"]),
+        "app_name": TRULENS_APP_NAME,
+        "app_version": f"{TRULENS_APP_VERSION}-eval",
+        "feedback_model": TRULENS_FEEDBACK_MODEL,
+        "detalle": detalle,
+    }
+
 @app.post("/evaluar")
 async def evaluar():
     """
@@ -1116,6 +1328,12 @@ async def estado():
         "query_num_ctx"      : 4096,
         "max_context_enviado": MAX_CONTEXT_LENGTH,
         "reranker"           : RERANKER_MODEL,
+        "trulens"            : {
+            "disponible": TRULENS_AVAILABLE,
+            "app_name": TRULENS_APP_NAME,
+            "app_version": TRULENS_APP_VERSION,
+            "feedback_model": TRULENS_FEEDBACK_MODEL,
+        },
         "video_concurrency"  : VIDEO_CONCURRENCY,
         "retrieval_top_k"    : RETRIEVAL_TOP_K,
         "reranker_top_n"     : RERANKER_TOP_N,
