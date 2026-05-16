@@ -149,31 +149,30 @@ SCORE_MAP = {
 # =============================================================================
 EVAL_DATASET = [
     {
-        "question": "¿Qué es la Constitución Política?",
-        "ground_truth": "Es la norma suprema de un Estado que establece la organización del poder y los derechos fundamentales.",
+        "question": "¿Qué es el marketing digital?",
+        "ground_truth": "Es el conjunto de estrategias y acciones que usan canales digitales para promocionar productos, servicios o marcas y conectar con una audiencia objetivo.",
     },
     {
-        "question": "¿Cuál es la función principal de la Constitución?",
-        "ground_truth": "Organizar el poder del Estado y garantizar los derechos fundamentales de las personas.",
+        "question": "¿Qué es una estrategia SEO?",
+        "ground_truth": "Es un conjunto de técnicas orientadas a mejorar la visibilidad de un sitio web en los resultados orgánicos de los motores de búsqueda.",
     },
     {
-        "question": "¿Qué regula la Constitución del Perú de 1993?",
-        "ground_truth": "Regula el sistema político y la organización del Estado peruano.",
+        "question": "¿Qué es una variable en Python?",
+        "ground_truth": "Es un nombre que referencia un valor almacenado en memoria y permite usarlo o modificarlo durante la ejecución de un programa.",
+    },
+    {
+        "question": "¿Qué es una función en Python?",
+        "ground_truth": "Es un bloque de código reutilizable que realiza una tarea específica, puede recibir parámetros y puede devolver un resultado.",
     },
     {
         "question": "¿Qué es el Derecho Civil?",
-        "ground_truth": "Es la rama del derecho que regula las relaciones entre personas en el ámbito privado.",
+        "ground_truth": "Es la rama del derecho privado que regula las relaciones jurídicas entre personas, como obligaciones, contratos, bienes, familia y sucesiones.",
     },
     {
-        "question": "¿Qué es el Derecho Penal?",
-        "ground_truth": "Es la rama del derecho que regula los delitos y establece sanciones.",
-    },
-    {
-        "question": "¿Cuál es la función del Derecho Penal?",
-        "ground_truth": "Proteger bienes jurídicos y sancionar conductas ilícitas.",
+        "question": "¿Qué es un contrato en Derecho Civil?",
+        "ground_truth": "Es un acuerdo de voluntades entre dos o más partes destinado a crear, regular, modificar o extinguir obligaciones jurídicas.",
     },
 ]
-
 # =============================================================================
 # APP + ESTADO GLOBAL
 # =============================================================================
